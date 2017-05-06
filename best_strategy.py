@@ -107,6 +107,30 @@ def affine_recourse(c,A,b, initial_cash, B, sigma):
     prob.solve()
     return obj.value, v.value
 
+def affine_cash(c,A,b, initial_cash, B, sigma):
+    v = cvx.Variable(len(c))
+    X = cvx.Variable(rows=len(b)-1, cols=len(A))
+    gain = c.T * v - sigma * cvx.norm1(X.T * c[:len(b)-1])
+    const = []
+    for i in range(len(b) - 1):
+        for j in range(len(A)):
+            if i <= j:
+                const += [X[i, j] == 0]
+    B_minus_AV = B - A[:,:len(b) - 1] * X
+    B_norm = cvx.norm1(B_minus_AV[0, :])
+    const += [A[0, :].T * v >= b[0] + sigma * B_norm - initial_cash]
+    for i in range(1, len(b)):
+        B_norm = cvx.norm1(B_minus_AV[i, :])
+        const += [A[i, :].T * v >= b[i] + sigma * B_norm]
+    for i in range(len(b) - 1):
+        X_norm = cvx.norm1(X[i, :])
+        const += [v[i] >= sigma * X_norm]
+        const += [v[i] + sigma * X_norm <= 1]
+    obj = cvx.Maximize(gain)
+    prob = cvx.Problem(objective=obj, constraints=const)
+    prob.solve()
+    return obj.value, v.value
+
 def is_feasibile(A,opt_values,cash, liability):
     if opt_values is None:
         return False
@@ -131,15 +155,18 @@ def update_cash(A,opt_values,cash,liability,T, t, y_opt):
 
 
 def run(c, A, b_real, T, cash_naive, cash_robust, cash_affine_recourse,
+        cash_affine_cash,
         all_liability_history, sigma_robust,
         sigma_affine_recourse, predict_method='MA2'):
     best_strategy_return, best_strategy_opt_values = \
         naive_strategy(c, A, b_real, cash_naive)
     regret_naive_strategy, regret_robust_strategy, \
     regret_affine_recourse = 0, 0, 0
+    regret_affine_cash = 0
     y_opt_cash_naive = np.zeros(3)
     y_opt_cash_robust = np.zeros(3)
     y_opt_cash_affine_recourse = np.zeros(3)
+    y_opt_cash_affine_cash = np.zeros(3)
     for i in range(T):
         params, b = predict_liabilities(np.append(
             all_liability_history,b_real[:i]), T-i, predict_method)
@@ -170,6 +197,16 @@ def run(c, A, b_real, T, cash_naive, cash_robust, cash_affine_recourse,
                             T,i,y_opt_cash_affine_recourse)
             if cash_affine_recourse == -1.0E6:
                 regret_affine_recourse = best_strategy_return
+        if regret_affine_cash < best_strategy_return:
+            affine_cash_return, affine_cash_opt_values = \
+                affine_cash(c, A, b, cash_affine_cash, B,
+                                sigma_affine_recourse)
+            cash_affine_cash, y_opt_cash_affine_cash = \
+                update_cash(A, affine_cash_opt_values,
+                            cash_affine_cash, b_real[i],
+                            T, i, y_opt_cash_affine_cash)
+            if cash_affine_cash == -1.0E6:
+                regret_affine_cash = best_strategy_return
         if i <= 2:
             c = np.delete(c, [0, T - i - 1, T - 2 * i + 2])
             A = np.delete(A, 0, axis=0)
@@ -184,8 +221,11 @@ def run(c, A, b_real, T, cash_naive, cash_robust, cash_affine_recourse,
         regret_robust_strategy = best_strategy_return - cash_robust
     if regret_affine_recourse == 0:
         regret_affine_recourse = best_strategy_return - cash_affine_recourse
+    if regret_affine_cash == 0:
+        regret_affine_cash = best_strategy_return - cash_affine_cash
     return best_strategy_return, regret_naive_strategy, \
-           regret_robust_strategy, regret_affine_recourse
+           regret_robust_strategy, regret_affine_recourse,\
+           regret_affine_cash
 
 if __name__ == '__main__':
     all_liability_history = np.loadtxt('projectdata.txt')
@@ -195,6 +235,7 @@ if __name__ == '__main__':
     cash_naive = 70.3
     cash_robust = 70.3
     cash_affine_recourse = 70.3
+    cash_affine_cash = 70.3
     sigma_robust = 3.0
     sigma_affine_recourse = 3.0
     T = 6
@@ -209,10 +250,12 @@ if __name__ == '__main__':
     ### Training on historical data
     dict_expected_regret = {"Naive strategy regret": 0,
                             "Robust strategy regret": 0,
-                            "Affine Recourse regret": 0}
+                            "Affine Recourse regret": 0,
+                            "Affine cash regret": 0}
     dict_best_strategy = {"Naive strategy": 0,
                       "Robust strategy": 0,
                       "Affine Recourse": 0,
+                      "Affine cash": 0,
                       "None feasible": 0}
     count = 0
     for i in range(54, 6, -1):
@@ -220,15 +263,18 @@ if __name__ == '__main__':
         training_data = all_liability_history[:-i]
         b_real = all_liability_history[-i:-i + 6]
         best_strategy_return, regret_naive_strategy, \
-        regret_robust_strategy, regret_affine_recourse = run(c, A,
+        regret_robust_strategy, regret_affine_recourse, \
+        regret_affine_cash = run(c, A,
         all_liability_history[-i:-i+6], T,cash_naive,cash_robust,cash_affine_recourse,
+                                                             cash_affine_cash,
         all_liability_history[:-i],sigma_robust,sigma_affine_recourse,predict_method)
         dict_expected_regret["Naive strategy regret"] += regret_naive_strategy
         dict_expected_regret["Robust strategy regret"] += regret_robust_strategy
         dict_expected_regret["Affine Recourse regret"] += regret_affine_recourse
+        dict_expected_regret["Affine cash regret"] += regret_affine_cash
         if regret_affine_recourse == regret_naive_strategy and\
             regret_affine_recourse == regret_robust_strategy:
-            best_strategy_index = 3
+            best_strategy_index = 4
         else:
             best_strategy_index = np.argmin([
                 regret_naive_strategy,
@@ -241,10 +287,13 @@ if __name__ == '__main__':
         elif best_strategy_index == 2:
             dict_best_strategy["Affine Recourse"] += 1
         elif best_strategy_index == 3:
+            dict_best_strategy["Affine cash"] += 1
+        elif best_strategy_index == 4:
             dict_best_strategy["None feasible"] += 1
     dict_expected_regret["Naive strategy regret"] /= count
     dict_expected_regret["Robust strategy regret"] /= count
     dict_expected_regret["Affine Recourse regret"] /= count
+    dict_expected_regret["Affine cash regret"] /= count
     print dict_expected_regret
     print dict_best_strategy
 
@@ -252,12 +301,14 @@ if __name__ == '__main__':
     training_data = all_liability_history
     b_real = test_data
     best_strategy_return, regret_naive_strategy, \
-    regret_robust_strategy, regret_affine_recourse = \
+    regret_robust_strategy, regret_affine_recourse, \
+    regret_affine_cash = \
                   run(c, A,
                   b_real, T,
                   cash_naive,
                   cash_robust,
                   cash_affine_recourse,
+                      cash_affine_cash,
                   training_data,
                   sigma_robust,
                   sigma_affine_recourse,
@@ -265,11 +316,12 @@ if __name__ == '__main__':
     print "Regret for naive strategy = " + str(regret_naive_strategy)
     print "Regret for robust strategy = " + str(regret_robust_strategy)
     print "Regret for affine recourse = " + str(regret_affine_recourse)
+    print "Regret for affine cash = " + str(regret_affine_cash)
     all_strategies = ["Naive Strategy", "Robust strategy",
-                      "Affine Recourse", "None feasible"]
+                      "Affine Recourse", "Affine cash", "None feasible"]
     if regret_affine_recourse == regret_naive_strategy and \
                     regret_affine_recourse == regret_robust_strategy:
-        best_strategy_index = 3
+        best_strategy_index = 4
     else:
         best_strategy_index = np.argmin([regret_naive_strategy,
                     regret_robust_strategy, regret_affine_recourse])
@@ -278,10 +330,12 @@ if __name__ == '__main__':
     ### More test data
     dict_expected_regret = {"Naive strategy regret": 0,
                             "Robust strategy regret": 0,
-                            "Affine Recourse regret": 0}
+                            "Affine Recourse regret": 0,
+                            "Affine cash regret": 0}
     dict_best_strategy = {"Naive strategy": 0,
                       "Robust strategy": 0,
                       "Affine Recourse": 0,
+                      "Affine cash": 0,
                       "None feasible": 0}
     lines = [line.rstrip('\n')[:-1] for line in open('more_test_data.txt')]
     count = 0
@@ -290,12 +344,14 @@ if __name__ == '__main__':
         training_data = all_liability_history
         b_real = [float(j) for j in lines[i].split(',')]
         best_strategy_return, regret_naive_strategy, \
-        regret_robust_strategy, regret_affine_recourse = \
+        regret_robust_strategy, regret_affine_recourse, \
+        regret_affine_cash = \
             run(c, A,
                 b_real, T,
                 cash_naive,
                 cash_robust,
                 cash_affine_recourse,
+                cash_affine_cash,
                 training_data,
                 sigma_robust,
                 sigma_affine_recourse,
@@ -303,12 +359,14 @@ if __name__ == '__main__':
         dict_expected_regret["Naive strategy regret"] += regret_naive_strategy
         dict_expected_regret["Robust strategy regret"] += regret_robust_strategy
         dict_expected_regret["Affine Recourse regret"] += regret_affine_recourse
+        dict_expected_regret["Affine cash regret"] += regret_affine_cash
         if regret_affine_recourse == regret_naive_strategy and\
                         regret_affine_recourse == regret_robust_strategy:
-            best_strategy_index = 3
+            best_strategy_index = 4
         else:
             best_strategy_index = np.argmin([regret_naive_strategy,
-                            regret_robust_strategy, regret_affine_recourse])
+                            regret_robust_strategy, regret_affine_recourse,
+                                             regret_affine_cash])
         if best_strategy_index == 0:
             dict_best_strategy["Naive strategy"] += 1
         elif best_strategy_index == 1:
@@ -316,9 +374,12 @@ if __name__ == '__main__':
         elif best_strategy_index == 2:
             dict_best_strategy["Affine Recourse"] += 1
         elif best_strategy_index == 3:
+            dict_best_strategy["Affine cash"] += 1
+        elif best_strategy_index == 4:
             dict_best_strategy["None feasible"] += 1
     dict_expected_regret["Naive strategy regret"] /= count
     dict_expected_regret["Robust strategy regret"] /= count
     dict_expected_regret["Affine Recourse regret"] /= count
+    dict_expected_regret["Affine cash regret"] /= count
     print dict_expected_regret
     print dict_best_strategy
